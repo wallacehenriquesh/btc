@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>BTC Sub-Ranges + Alvo Dinâmico</title>
+
+<style>
+body {
+  font-family: Arial, sans-serif;
+  background: #020617;
+  color: #e5e7eb;
+  padding: 20px;
+}
+h2 { color: #38bdf8; }
+
+#lista {
+  margin-bottom: 15px;
+  padding: 10px;
+  border: 1px solid #1e293b;
+}
+
+.item {
+  cursor: pointer;
+  padding: 8px;
+  margin-bottom: 6px;
+  border: 1px solid #1e293b;
+  background: #0f172a;
+}
+
+.item:hover {
+  background: #111c33;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 12px;
+}
+
+.card {
+  border: 1px solid #1e293b;
+  padding: 10px;
+  border-radius: 6px;
+  background: #020617;
+  font-size: 13px;
+}
+
+.match {
+  color: red;
+  font-weight: bold;
+  white-space: pre-wrap;
+  margin-top: 6px;
+}
+</style>
+</head>
+
+<body>
+
+<h2>Bitcoin Search — Alvo Dinâmico</h2>
+
+<div id="lista"></div>
+<div class="grid" id="grid"></div>
+
+<script type="module">
+
+import { getPublicKey } from "https://esm.sh/@noble/secp256k1@2.1.0";
+import { sha256 } from "https://esm.sh/@noble/hashes@1.3.3/sha256";
+import { ripemd160 } from "https://esm.sh/@noble/hashes@1.3.3/ripemd160";
+
+/* =========================
+   ALVO DINÂMICO
+========================= */
+let ENDERECO_MATCH = null;
+
+/* =========================
+   LISTA DE PÚZZLES
+========================= */
+const PUZZLES = [
+  { addr:"1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU", saldo:"7.1 BTC", bits:71 },
+  { addr:"1JTK7s9YVYywfm5XUH7RNhHJH1LshCaRFR", saldo:"7.2 BTC", bits:72 },
+  { addr:"12VVRNPi4SJqUTsp6FmqDqY5sGosDtysn4", saldo:"7.3 BTC", bits:73 },
+  { addr:"1FWGcVDK3JGzCC3WtkYetULPszMaK2Jksv", saldo:"7.4 BTC", bits:74 },
+  { addr:"1DJh2eHFYQfACPmrvpyWc8MSTYKh7w9eRF", saldo:"7.6 BTC", bits:76 }
+];
+
+/* UI LISTA */
+const lista = document.getElementById("lista");
+
+PUZZLES.forEach(p => {
+  const div = document.createElement("div");
+  div.className = "item";
+
+  div.innerHTML = `
+    <b>${p.addr}</b><br>
+    💰 Saldo: ${p.saldo} | 🔐 Entropia: ${p.bits} bits
+  `;
+
+  div.onclick = () => {
+    ENDERECO_MATCH = p.addr;
+    alert("Alvo selecionado:\n" + p.addr);
+  };
+
+  lista.appendChild(div);
+});
+
+/* =========================
+   CONFIGURAÇÃO RANGE
+========================= */
+const RANGE_MIN = BigInt("0x400000000000000000");
+const RANGE_MAX = BigInt("0x7fffffffffffffffff");
+const TOTAL_SUBRANGES = 10;
+
+/* BASE58 */
+const ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+function base58(buf) {
+  let zeros = 0;
+  while (zeros < buf.length && buf[zeros] === 0) zeros++;
+
+  let num = BigInt("0x" + [...buf].map(b => b.toString(16).padStart(2,"0")).join(""));
+  let out = "";
+
+  while (num > 0n) {
+    out = ALPHABET[num % 58n] + out;
+    num /= 58n;
+  }
+
+  return "1".repeat(zeros) + out;
+}
+
+/* RANDOM */
+function randomBigInt(min, max) {
+  const range = max - min;
+  const bytes = Math.ceil(range.toString(2).length / 8);
+
+  let rnd;
+  do {
+    const buf = crypto.getRandomValues(new Uint8Array(bytes));
+    rnd = BigInt("0x" + [...buf].map(b=>b.toString(16).padStart(2,"0")).join(""));
+  } while (rnd > range);
+
+  return min + rnd;
+}
+
+/* DOWNLOAD TXT */
+function baixarTXT(texto, nome="match.txt") {
+  const blob = new Blob([texto], {type:"text/plain"});
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = nome;
+  a.click();
+
+  URL.revokeObjectURL(url);
+}
+
+/* SUBRANGES */
+const RANGE_SIZE = RANGE_MAX - RANGE_MIN + 1n;
+const SUB_SIZE = RANGE_SIZE / BigInt(TOTAL_SUBRANGES);
+
+const grid = document.getElementById("grid");
+
+const subs = [];
+
+for (let i=0;i<TOTAL_SUBRANGES;i++){
+  const min = RANGE_MIN + SUB_SIZE * BigInt(i);
+  const max = (i===TOTAL_SUBRANGES-1)? RANGE_MAX : min + SUB_SIZE - 1n;
+
+  const card = document.createElement("div");
+  card.className = "card";
+
+  card.innerHTML = `
+    <b>Sub-range ${i+1}</b><br>
+    Gerados: <span class="g">0</span><br>
+    Velocidade: <span class="v">0</span><br>
+    Último: <div class="l">---</div>
+  `;
+
+  grid.appendChild(card);
+
+  subs.push({
+    min,max,
+    total:0,
+    lastTime:performance.now(),
+    lastTotal:0,
+    g:card.querySelector(".g"),
+    v:card.querySelector(".v"),
+    l:card.querySelector(".l")
+  });
+}
+
+/* =========================
+   GERAR ENDEREÇO
+========================= */
+function gerarEndereco(sub){
+  const privBig = randomBigInt(sub.min, sub.max);
+
+  const privHex = privBig.toString(16).padStart(64,"0");
+  const priv = Uint8Array.from(privHex.match(/.{2}/g).map(b=>parseInt(b,16)));
+
+  const pub = getPublicKey(priv, true);
+  const hash160 = ripemd160(sha256(pub));
+
+  const payload = new Uint8Array([0x00, ...hash160]);
+  const checksum = sha256(sha256(payload)).slice(0,4);
+
+  const address = base58(new Uint8Array([...payload, ...checksum]));
+
+  return { privHex, address };
+}
+
+/* =========================
+   LOOP PRINCIPAL
+========================= */
+function loop(){
+  const now = performance.now();
+
+  for (const sub of subs){
+
+    const r = gerarEndereco(sub);
+
+    sub.total++;
+    sub.g.textContent = sub.total;
+    sub.l.textContent = r.address;
+
+    const delta = (now - sub.lastTime)/1000;
+
+    if (delta >= 1){
+      sub.v.textContent = Math.floor((sub.total - sub.lastTotal)/delta);
+      sub.lastTime = now;
+      sub.lastTotal = sub.total;
+    }
+
+    /* MATCH */
+    if (ENDERECO_MATCH && r.address === ENDERECO_MATCH){
+
+      const dados =
+`MATCH ENCONTRADO
+PRIVATE KEY: ${r.privHex}
+ADDRESS: ${r.address}`;
+
+      localStorage.setItem("btc_match", dados);
+      baixarTXT(dados, "btc_match.txt");
+
+      const d = document.createElement("div");
+      d.className = "match";
+      d.textContent = dados;
+
+      sub.card.appendChild(d);
+    }
+  }
+
+  requestAnimationFrame(loop);
+}
+
+loop();
+
+</script>
+
+</body>
+</html>
